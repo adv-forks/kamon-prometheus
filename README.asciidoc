@@ -1,0 +1,268 @@
+kamon-prometheus
+================
+
+// tag::preamble[]
+
+image:https://api.bintray.com/packages/monsanto/maven/kamon-prometheus/images/download.svg[link="https://bintray.com/monsanto/maven/kamon-prometheus/_latestVersion"]
+image:https://coveralls.io/repos/github/MonsantoCo/kamon-prometheus/badge.svg?branch=master["Coverage status", link="https://coveralls.io/github/MonsantoCo/kamon-prometheus?branch=master"]
+image:https://travis-ci.org/MonsantoCo/kamon-prometheus.svg?branch=master["Build Status", link="https://travis-ci.org/MonsantoCo/kamon-prometheus"]
+
+This library provides a Kamon module that can serve metrics to
+http://prometheus.io/[Prometheus], an open source service monitoring system and
+time series database.  Since Prometheus uses a scraping mechanism and its own
+data model, this module bridges the gap between the two.  It converts Kamon
+metrics into a Prometheus-friendly format and provides integrations for both
+Spray and Akka HTTP so that your application can serve metrics to Prometheus.
+
+Features
+--------
+
+* Converts Kamon metrics data to conform to Prometheus’ data model, including:
+** Reasonably handles all Kamon entities, including custom entities
+** Preservation of units of measurement
+* Provides Spray and Akka HTTP route that supports:
+** Both text and https://developers.google.com/protocol-buffers/[Protocol
+   buffer] representation formats
+** Optional gzip compression
+* Allows collection of snapshots without an endpoint using an actor
+* Allows configuration of:
+** Refresh interval to match Prometheus
+** Metric subscriptions to export
+** Additional Prometheus labels on exported metrics
+
+// end::preamble[]
+
+
+Installation
+------------
+
+In order to use this module, you will need to add the following dependency to
+your `build.sbt`:
+
+[source,scala]
+------------------------------------------------------------------------------
+libraryDependencies += "com.monsanto.arch" %% "kamon-prometheus" % "0.2.0"
+------------------------------------------------------------------------------
+
+You may also need to add JCenter as a resolver:
+
+[source,scala]
+------------------------------------------------------------------------------
+resolvers += Resolver.jcenterRepo
+------------------------------------------------------------------------------
+
+Kamon’s module loader should automatically detect the presence of
+_kamon-prometheus_ and start it.  However, in order to be useful, you will need
+to <<Usage,include the extension’s Spray or Akka HTTP routes somewhere in your
+service>> so that Prometheus can invoke it.
+
+
+Dependencies
+------------
+
+This module depends on:
+
+* http://akka.io[Akka actors]
+* http://kamon.io[Kamon core]
+* https://github.com/typesafehub/config[Typesafe config]
+* https://developers.google.com/protocol-buffers/[Protocol buffers for Java]
+* http://akka.io[Akka HTTP] _(optional)_
+* http://spray.io/[Spray routing] _(optional)_
+* https://github.com/scala/scala-parser-combinators[Scala parser combinators] _(optional)_
+
+Additional dependencies are required if you are interested in
+<<building,building the library>>.
+
+
+Configuration
+-------------
+
+You can configure the module much like any other Kamon module, by modifying
+your `application.conf`.  All of the configuration entries for
+_kamon-prometheus_ are placed under `kamon.prometheus`.
+
+=== Refresh interval
+
+The `kamon.prometheus.refresh-interval` setting determines how often the
+_kamon-prometheus_ will flush and serve new data.  This setting must be at
+least as large as `kamon.metric.tick-interval`, and should match Prometheus’
+`scrape_interval`.  The default refresh interval is one minute, which matches
+Prometheus’ default.
+
+=== Subscriptions
+
+Like most other Kamon reporting module, _kamon-prometheus_ allows you to
+configure the metric categories to which the module will subscribe.  By
+default, the following subscriptions are included:
+
+
+[source,scala]
+.The default _kamon-prometheus_ subscriptions
+------------------------------------------------------------------------------
+kamon.prometheus {
+  subscriptions {
+    histogram        = [ "**" ]
+    min-max-counter  = [ "**" ]
+    gauge            = [ "**" ]
+    counter          = [ "**" ]
+    trace            = [ "**" ]
+    trace-segment    = [ "**" ]
+    akka-actor       = [ "**" ]
+    akka-dispatcher  = [ "**" ]
+    akka-router      = [ "**" ]
+    system-metric    = [ "**" ]
+    http-server      = [ "**" ]
+    spray-can-server = [ "**" ]
+  }
+------------------------------------------------------------------------------
+
+
+=== Additional labels
+
+_kamon-prometheus_ will automatically add a metric’s tags, name, and category
+to a published metric as labels.  If you which to add additional labels, you
+can add them under the `kamon.prometheus.labels` path, which is empty by
+default.
+
+For example, given:
+
+[source,scala]
+.The default _kamon-prometheus_ subscriptions
+------------------------------------------------------------------------------
+kamon.prometheus {
+  labels {
+    application_name = "my cool app"
+    application_version = "42"
+  }
+}
+------------------------------------------------------------------------------
+
+All metrics published by _kamon-prometheus_ will add the labels
+`application_name="my cool app"` and `application_version="42"` to all
+published metrics.  Keep in mind  that label names may munged to fit
+http://prometheus.io/docs/concepts/data_model/#metric-names-and-labels[Prometheus’ naming requirements].
+
+
+Usage
+-----
+
+There are currently three principal ways to use _kamon-prometheus_:
+
+1. Using the Spray endpoint
+2. Using the Akka HTTP endpoint
+3. Collecting metrics via an Actor
+
+Once you have made the metrics available, you will need to configure
+Prometheus to scrape your application.
+
+=== Using the Spray endpoint
+
+The module provides a Spray route which you can access via
+`SprayEndpoint(system).route` where `system` is an actor system.  You can
+place this route anywhere in your application, but keep in mind that Prometheus
+scrapes `/metrics` by default.  The following is the code for a minimal
+application that will serve metrics from `http://localhost:8888/metrics`:
+
+[source,scala]
+.A minimal Spray application
+------------------------------------------------------------------------------
+import akka.actor.ActorSystem
+import com.monsanto.arch.kamon.prometheus.spray.SprayEndpoint
+import spray.routing.SimpleRoutingApp
+
+object Main extends App with SimpleRoutingApp {
+  implicit val actorSystem = ActorSystem()
+
+  startServer("localhost", 8888) {
+    path("metrics") {
+      SprayEndpoint(actorSystem).route
+    }
+  }
+}
+------------------------------------------------------------------------------
+
+Note that the route will only respond to `GET` requests and will automatically
+handle compression and media type negotiation.  If there is no content yet
+(generally before the first set of metrics has been collected), the route will
+return a _No Content_ response (204).
+
+=== Using the Akka HTTP endpoint
+
+Using the Akka HTTP endpoint is just like using the Spray endpoint above,
+except that you use a different Akka extension.
+
+[source,scala]
+.A minimal Akka HTTP application
+------------------------------------------------------------------------------
+import akka.actor.ActorSystem
+import akka.http.scaladsl.Http
+import akka.http.scaladsl.server.Directives._
+import akka.stream.ActorMaterializer
+import com.monsanto.arch.kamon.prometheus.akka_http.AkkaHttpEndpoint
+
+object Main extends App {
+  implicit val system = ActorSystem()
+  implicit val materializer = ActorMaterializer()
+
+  val route = {
+    path("metrics") {
+      AkkaHttpEndpoint(system).route
+    }
+  }
+
+  val bindingFuture = Http().bindAndHandle(route, "localhost", 8888)
+}
+------------------------------------------------------------------------------
+
+=== Getting snapshots with an actor
+
+For this functionality, please consult the documentation for
+http://monsantoco.github.io/kamon-prometheus/api/0.2.0/#com.monsanto.arch.kamon.prometheus.PrometheusExtension[PrometheusExtension].
+
+=== Consuming the metrics
+
+Finally, all you need to do is
+http://prometheus.io/docs/operating/configuration/#scrape-configurations-scrape_config[configure
+a scrape configuration in Prometheus].  The following snippet is a minimal
+example that shold work with the minimal server from the previous section.
+
+[source,yaml]
+.A minimal Prometheus configuration snippet
+------------------------------------------------------------------------------
+scrape_configs:
+  - job_name: example
+    target_groups:
+      - targets: ['localhost:8888']
+------------------------------------------------------------------------------
+
+Note that the above configuration uses the default `scrape_interval` (one
+minute, matching _kamon-prometheus’_ default.) and `metrics_path` (`/metrics`).
+
+
+Development
+-----------
+
+[[building]]
+=== Building the library
+
+You can use `sbt` to build the library, but you will need to have Google’s
+protocol buffers compiler `protoc` on your path.  You can
+https://developers.google.com/protocol-buffers/docs/downloads[download]
+Protocol buffers directly from Google.  However, there may be simpler options.
+For example, on OS X, you can use http://brew.sh[homebrew] and just `brew
+install protobuf`.
+
+Additionally, to build the demo, you will need to have Docker set up.
+
+
+=== Contributing to the project
+
+Outside contributions to this project are welcome!  Please review
+link:CONTRIBUTING.md[] for more information.
+
+
+Future plans
+------------
+
+Check out the https://github.com/MonsantoCo/kamon-prometheus/issues[issues]
+page.  Please star issues that are important to you.
